@@ -8,11 +8,12 @@
     "storage"
   ],
   "host_permissions": [
-    "https://api.groq.com/*"
+    "https://generativelanguage.googleapis.com/*"
   ],
   "content_scripts": [{
     "matches": ["<all_urls>"],
-    "js": ["content.js"]
+    "js": ["config.js", "content.js"],
+    "run_at": "document_end"
   }],
   "action": {
     "default_popup": "popup.html",

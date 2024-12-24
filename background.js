@@ -4,8 +4,8 @@ let isEnabled = true;
 // Listen for messages from content script
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "getApiKey") {
-        chrome.storage.local.get(['GROQ_API_KEY'], function(result) {
-            sendResponse({ apiKey: result.GROQ_API_KEY });
+        chrome.storage.local.get(['GEMINI_API_KEY'], function(result) {
+            sendResponse({ apiKey: result.GEMINI_API_KEY });
         });
         return true;
     }

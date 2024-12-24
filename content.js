@@ -1,7 +1,12 @@
 // Constants
-const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-//const MODEL = 'mixtral-8x7b-32768';
-const MODEL = "llama3-70b-8192";
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+let GEMINI_API_KEY = '';
+
+// Wait for config to be loaded
+window.addEventListener('load', () => {
+    GEMINI_API_KEY = window.CONFIG?.GEMINI_API_KEY;
+});
+
 const browserAPI = window.browser || window.chrome;
 
 class ContentSummarizer {
@@ -13,12 +18,20 @@ class ContentSummarizer {
         this.isEnabled = true;
         this.languageLevel = 'intermediate';
         this.voiceOption = 'none';
+        this.siteScope = 'current';
+        this.hostname = window.location.hostname;
         this.speechSynthesis = window.speechSynthesis;
         this.currentUtterance = null;
         this.voices = [];
+        this.rateLimitedUntil = 0;  // Timestamp when rate limit expires
         this.setupListeners();
         this.loadSettings();
         this.loadVoices();
+    }
+
+    getRateLimitMessage() {
+        const waitTime = Math.ceil((this.rateLimitedUntil - Date.now()) / 1000);
+        return `Gemini API rate limit reached. Please wait ${waitTime} seconds before trying again.`;
     }
 
     createTooltip() {
@@ -102,6 +115,11 @@ class ContentSummarizer {
                 if (this.voiceOption === 'none') {
                     this.stopSpeech();
                 }
+            } else if (request.action === 'setSiteScope') {
+                this.siteScope = request.siteScope;
+                // Enable for current site if scope is 'current' and this is the current site
+                this.isEnabled = this.siteScope === 'all' || 
+                    (this.siteScope === 'current' && request.hostname === this.hostname);
             }
         });
 
@@ -173,7 +191,8 @@ class ContentSummarizer {
 
     async showSummaryWithOverlay(element, event) {
         const text = element.textContent.trim();
-        if (!text || text.length < 50) return;
+        const wordCount = text ? text.split(/\s+/).length : 0;
+        if (!text || wordCount < 100 || !this.canSummarize()) return;
 
         // Update overlay
         const rect = element.getBoundingClientRect();
@@ -188,7 +207,7 @@ class ContentSummarizer {
         if (this.summaryCache.has(text)) {
             summary = this.summaryCache.get(text);
         } else {
-            summary = await this.summarizeWithGroq(text);
+            summary = await this.summarizeText(text);
             this.summaryCache.set(text, summary);
         }
 
@@ -196,7 +215,9 @@ class ContentSummarizer {
         this.tooltip.innerHTML = summary;
         this.tooltip.style.display = 'block';
         this.updateTooltipPosition(event);
-        this.speakSummary(summary);
+        if (!summary.includes('Error') && !summary.includes('Please set your Groq API key')) {
+            this.speakSummary(summary);
+        }
     }
 
     hideTooltipAndOverlay() {
@@ -207,16 +228,75 @@ class ContentSummarizer {
     }
 
     findMeaningfulContainer(element) {
-        const meaningfulTags = ['p', 'article', 'div', 'section', 'main', 'span'];
+        // Tags that we want to exclude completely
+        const excludedTags = ['button', 'nav', 'header', 'footer', 'menu'];
+        // Tags that might contain meaningful content despite being headers
+        const headerTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
+        // Tags that are likely to contain meaningful content
+        const meaningfulTags = ['p', 'article', 'div', 'section', 'main'];
         let current = element;
 
         while (current && current !== document.body) {
+            // Skip if element is or is within excluded tags
+            if (excludedTags.includes(current.tagName.toLowerCase())) {
+                return null;
+            }
+            
+            // Skip if the element is just a link with no substantial content
+            if (current.tagName.toLowerCase() === 'a') {
+                const hasOnlyLink = Array.from(current.childNodes).every(node => 
+                    node.nodeType === Node.TEXT_NODE || 
+                    node.tagName?.toLowerCase() === 'img' ||
+                    node.tagName?.toLowerCase() === 'svg'
+                );
+                if (hasOnlyLink) {
+                    return null;
+                }
+            }
+            
             // Check if element has enough text content
             const text = current.textContent?.trim();
-            if (text && text.length > 50 && 
+            const wordCount = text ? text.split(/\s+/).length : 0;
+            
+            // Different word count thresholds for different types of content
+            let minWordCount = 100;  // Default minimum word count
+            
+            // Adjust threshold for headers with following content
+            if (headerTags.includes(current.tagName.toLowerCase())) {
+                const nextElement = current.nextElementSibling;
+                if (nextElement) {
+                    const combinedText = text + ' ' + nextElement.textContent.trim();
+                    const combinedWordCount = combinedText.split(/\s+/).length;
+                    if (combinedWordCount >= minWordCount) {
+                        return nextElement;  // Return the content following the header
+                    }
+                }
+                return null;  // Skip standalone headers
+            }
+            
+            if (text && text.length > 50 && wordCount >= minWordCount &&
                 (meaningfulTags.includes(current.tagName.toLowerCase()) ||
                  current.className.includes('text') ||
-                 current.className.includes('content'))) {
+                 current.className.includes('content') ||
+                 // Additional checks for content containers
+                 current.className.includes('paragraph') ||
+                 current.className.includes('body') ||
+                 current.getAttribute('role') === 'article' ||
+                 current.getAttribute('role') === 'main')) {
+               
+                // If this is a large container, try to find a more specific content block
+                if (wordCount > 500) {
+                    const betterContainer = Array.from(current.children)
+                        .find(child => {
+                            const childText = child.textContent.trim();
+                            const childWordCount = childText.split(/\s+/).length;
+                            return childWordCount >= minWordCount && 
+                                   meaningfulTags.includes(child.tagName.toLowerCase());
+                        });
+                    if (betterContainer) {
+                        return betterContainer;
+                    }
+                }
                 return current;
             }
             current = current.parentElement;
@@ -224,101 +304,132 @@ class ContentSummarizer {
         return null;
     }
 
-    async summarizeWithGroq(text) {
+    async summarizeText(text) {
         try {
+            // Wait for API key to be loaded if necessary
+            if (!GEMINI_API_KEY) {
+                GEMINI_API_KEY = window.CONFIG?.GEMINI_API_KEY;
+                if (!GEMINI_API_KEY) {
+                    throw new Error('API key not loaded');
+                }
+            }
+            if (Date.now() < this.rateLimitedUntil) {
+                return this.getRateLimitMessage();
+            }
+
             const response = await new Promise((resolve) => {
-                chrome.storage.local.get(['GROQ_API_KEY', 'apiOption', 'languageLevel'], resolve);
+                chrome.storage.local.get(['languageLevel'], resolve);
             });
 
-            let apiKey;
-            if (response.apiOption === 'subscription') {
-                // Use subscription endpoint
-                const subscriptionResponse = await fetch('https://your-api.com/summarize', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ text })
-                });
-                
-                if (!subscriptionResponse.ok) {
-                    throw new Error('Subscription API error');
-                }
-                
-                const data = await subscriptionResponse.json();
-                return data.summary;
-            } else {
-                // Use direct Groq API with user's key
-                apiKey = response.GROQ_API_KEY;
-                if (!apiKey) {
-                    throw new Error('API key not set');
-                }
-                
-                const languageLevelPrompts = {
-                    beginner: "You are a helpful assistant that explains text in very simple terms, avoiding complex vocabulary and using basic sentence structures. Always start your summary with 'It'.",
-                    intermediate: "You are a helpful assistant that summarizes text concisely with moderate vocabulary. Always start your summary with 'It'.",
-                    advanced: "You are a helpful assistant that provides sophisticated summaries using advanced vocabulary and complex concepts. Always start your summary with 'It'."
-                };
-
-                const requestBody = {
-                    model: MODEL,
-                    messages: [
-                        {
-                            role: "system",
-                            content: languageLevelPrompts[this.languageLevel] + 
-                               " Additionally, mark warning words with [WARNING]word[/WARNING] and high-risk words with [RISK]word[/RISK]."
-                        },
-                        {
-                            role: "user",
-                            content: `Please summarize in 1-2 sentences, using ${this.languageLevel}-level language, starting with 'It'. Mark any warning or cautionary words with [WARNING]...[/WARNING] and high-risk or dangerous concepts with [RISK]...[/RISK]: ${text}`
-                        }
-                    ],
-                    temperature: 0.3,
-                    max_tokens: 100
-                };
-
-                console.log('Request URL:', GROQ_API_URL);
-                console.log('Request body:', requestBody);
-
-                const subscriptionResponse = await fetch(GROQ_API_URL, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${apiKey}`,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(requestBody)
-                });
-
-                if (!subscriptionResponse.ok) {
-                    const errorText = await subscriptionResponse.text();
-                    console.error('Response error:', errorText);
-                    throw new Error(`HTTP error! status: ${subscriptionResponse.status}`);
-                }
-
-                const data = await subscriptionResponse.json();
-                let summary = data.choices[0].message.content.trim();
-                
-                // Replace warning and risk tags with HTML spans
-                summary = summary
-                    .replace(/\[WARNING\](.*?)\[\/WARNING\]/g, '<span class="warning-text">$1</span>')
-                    .replace(/\[RISK\](.*?)\[\/RISK\]/g, '<span class="risk-text">$1</span>');
-                
-                return summary;
-            }
+            return await this.summarizeChunk(text, GEMINI_API_KEY);
         } catch (error) {
             console.error('Error summarizing:', error);
-            return error.message === 'API key not set' 
-                ? 'Please set your Groq API key in the extension popup'
-                : 'Error generating summary';
+            return 'Error generating summary';
         }
+    }
+
+    async summarizeChunk(text, apiKey) {
+        const languageLevelPrompts = {
+            beginner: "You are a helpful assistant that explains text in very simple terms, avoiding complex vocabulary and using basic sentence structures. Always start your summary with 'It'.",
+            intermediate: "You are a helpful assistant that summarizes text concisely with moderate vocabulary. Always start your summary with 'It'.",
+            advanced: "You are a helpful assistant that provides sophisticated summaries using advanced vocabulary and complex concepts. Always start your summary with 'It'."
+        };
+
+        const requestBody = {
+            contents: [{
+                parts: [{
+                    text: `${languageLevelPrompts[this.languageLevel]}\n\nPlease summarize in 1-2 sentences, using ${this.languageLevel}-level language, starting with 'It'. Mark any warning or cautionary words with <<WARNING>>...<</WARNING>> and high-risk or dangerous concepts with <<RISK>>...<</RISK>>: ${text}`
+                }]
+            }],
+            generationConfig: {
+                temperature: 0.3,
+                candidateCount: 1,
+                stopSequences: ["\n"]  // Stop at first newline to keep response concise
+            }
+        };
+
+        const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            if (errorText.includes('rate_limit_exceeded')) {
+                this.rateLimitedUntil = Date.now() + 60000;
+                return this.getRateLimitMessage();
+            }
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        let summary = data.candidates[0].content.parts[0].text.trim();
+        summary = this.formatHighlightTags(summary);
+        return summary;
+    }
+
+    formatHighlightTags(text) {
+        // First check if the text contains any of our special tags
+        const hasWarningTags = text.includes('<<WARNING>>') || text.includes('[WARNING]');
+        const hasRiskTags = text.includes('<<RISK>>') || text.includes('[RISK]');
+        
+        if (!hasWarningTags && !hasRiskTags) {
+            // If no tags, return text as is
+            return text;
+        }
+        
+        // Replace both old and new style tags with HTML spans
+        let formattedText = text
+            .replace(/\[WARNING\](.*?)\[\/WARNING\]/g, '<span class="warning-text">$1</span>')
+            .replace(/\[RISK\](.*?)\[\/RISK\]/g, '<span class="risk-text">$1</span>')
+            .replace(/<<WARNING>>(.*?)<<\/WARNING>>/g, '<span class="warning-text">$1</span>')
+            .replace(/<<RISK>>(.*?)<<\/RISK>>/g, '<span class="risk-text">$1</span>');
+        
+        // If formatting failed for some reason, remove all tag remnants
+        if (formattedText.includes('[WARNING]') || formattedText.includes('[RISK]') ||
+            formattedText.includes('<<WARNING>>') || formattedText.includes('<<RISK>>')) {
+            formattedText = text
+                .replace(/\[WARNING\]|\[\/WARNING\]|<<WARNING>>|<<\/WARNING>>/g, '')
+                .replace(/\[RISK\]|\[\/RISK\]|<<RISK>>|<<\/RISK>>/g, '');
+        }
+        
+        return formattedText;
+    }
+
+    async combineSummaries(summaries) {
+        // Remove the "It" prefix from subsequent summaries for better flow
+        const cleanedSummaries = summaries.map((summary, index) => 
+            index === 0 ? summary : summary.replace(/^It\s+/i, '')
+        );
+        
+        // Join with proper spacing and formatting
+        let combinedSummary = cleanedSummaries.join(' ');
+        
+        // Format or remove warning/risk tags
+        combinedSummary = this.formatHighlightTags(combinedSummary);
+        
+        return combinedSummary;
     }
 
     async loadSettings() {
         const settings = await new Promise((resolve) => {
-            chrome.storage.local.get(['languageLevel', 'voiceOption'], resolve);
+            chrome.storage.local.get([
+                'languageLevel', 
+                'voiceOption',
+                'siteScope',
+                'enabledSites'
+            ], resolve);
         });
         this.languageLevel = settings.languageLevel || 'intermediate';
         this.voiceOption = settings.voiceOption || 'none';
+        this.siteScope = settings.siteScope || 'current';
+        
+        // Check if extension should be enabled for this site
+        const enabledSites = settings.enabledSites || {};
+        this.isEnabled = enabledSites.allSites || enabledSites[this.hostname] || false;
     }
 
     stopSpeech() {
@@ -334,8 +445,11 @@ class ContentSummarizer {
         // Stop any current speech
         this.stopSpeech();
         
-        // Remove HTML tags for clean text-to-speech
-        const cleanText = text.replace(/<[^>]*>/g, '');
+        // Remove HTML tags and any error messages
+        let cleanText = text.replace(/<[^>]*>/g, '');
+        if (cleanText.includes('Error') || cleanText.includes('Please set your Groq API key')) {
+            return;
+        }
         
         const utterance = new SpeechSynthesisUtterance(cleanText);
         
@@ -450,6 +564,11 @@ class ContentSummarizer {
             }
         };
         loadVoicesWhenAvailable();
+    }
+
+    // Add method to check if text can be summarized
+    canSummarize() {
+        return Date.now() >= this.rateLimitedUntil;
     }
 }
 
