@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Smart Content Summarizer</title>
+    <style>
+        body {
+            width: 300px;
+            padding: 15px;
+            font-family: Arial, sans-serif;
+        }
+        .instructions {
+            line-height: 1.5;
+            color: #333;
+        }
+        kbd {
+            background-color: #f7f7f7;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            padding: 2px 6px;
+            font-size: 0.9em;
+        }
+        .api-key-section {
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #eee;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 5px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        .get-key-link {
+            display: block;
+            margin-top: 10px;
+            color: #2196F3;
+            text-decoration: none;
+            font-size: 0.9em;
+        }
+        .get-key-link:hover {
+            text-decoration: underline;
+        }
+        .api-options {
+            margin-bottom: 15px;
+        }
+        
+        .option-toggle {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 10px;
+        }
+        
+        .option-toggle label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+        }
+        
+        .option-toggle input[type="radio"] {
+            margin-right: 5px;
+        }
+        
+        .api-input-section {
+            display: none;
+        }
+        
+        .api-input-section.active {
+            display: block;
+        }
+        
+        .subscription-info {
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        
+        .price {
+            font-weight: bold;
+            color: #2196F3;
+        }
+        
+        .save-key-container {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 10px;
+        }
+        
+        .save-key-container .get-key-link {
+            margin-top: 0;
+        }
+    </style>
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+</head>
+<body>
+    <div class="instructions">
+        <h3>How to use:</h3>
+        <p>1. Hover your mouse over any text</p>
+        <p>2. See AI-generated summary in a tooltip</p>
+        <p>3. Press ESC to close the tooltip</p>
+    </div>
+    <div class="language-level">
+        <h3>Language Level</h3>
+        <div class="radio-group">
+            <label>
+                <input type="radio" name="languageLevel" value="beginner">
+                Beginner
+            </label>
+            <label>
+                <input type="radio" name="languageLevel" value="intermediate" checked>
+                Intermediate
+            </label>
+            <label>
+                <input type="radio" name="languageLevel" value="advanced">
+                Advanced
+            </label>
+        </div>
+    </div>
+    <div class="sound-settings">
+        <h3>Voice Options</h3>
+        <div class="radio-group">
+            <label>
+                <input type="radio" name="voiceOption" value="none" checked>
+                No Voice
+            </label>
+            <label>
+                <input type="radio" name="voiceOption" value="male">
+                Male Voice
+            </label>
+            <label>
+                <input type="radio" name="voiceOption" value="female">
+                Female Voice
+            </label>
+        </div>
+    </div>
+    <div class="api-key-section">
+        <h3>Settings</h3>
+        <div class="api-options">
+            <div class="option-toggle">
+                <label>
+                    <input type="radio" name="api-option" value="own" checked> 
+                    Use my own API key
+                </label>
+                <label>
+                    <input type="radio" name="api-option" value="subscription"> 
+                    Subscribe to our service
+                </label>
+            </div>
+        </div>
+        
+        <div id="ownKeySection" class="api-input-section active">
+            <label for="apiKey">Groq API Key:</label>
+            <input type="text" id="apiKey" placeholder="Enter your Groq API key">
+            <div class="save-key-container">
+                <a href="https://console.groq.com/keys" target="_blank" class="get-key-link">
+                    Get a free API key from Groq
+                </a>
+                <button id="saveKey">Save</button>
+            </div>
+        </div>
+        
+        <div id="subscriptionSection" class="api-input-section">
+            <div class="subscription-info">
+                <p>Subscribe to use our service:</p>
+                <ul>
+                    <li>No need to manage API keys</li>
+                    <li>Unlimited summaries</li>
+                    <li>Priority support</li>
+                </ul>
+                <p class="price">$4.99/month</p>
+            </div>
+            <button id="subscribe">Subscribe Now</button>
+        </div>
+    </div>
+    <script src="popup.js"></script>
+</body>
+</html> 
