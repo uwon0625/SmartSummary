@@ -876,3 +876,51 @@ class ContentSummarizer {
 
 // Initialize the summarizer
 const summarizer = new ContentSummarizer(); 
+
+function getMainContent() {
+    // Get all text content while excluding script, style, and other non-content elements
+    const forbiddenTags = ['script', 'style', 'noscript', 'header', 'nav', 'footer'];
+    
+    // Clone the body to avoid modifying the actual page
+    const bodyClone = document.body.cloneNode(true);
+    
+    // Remove forbidden elements
+    forbiddenTags.forEach(tag => {
+        const elements = bodyClone.getElementsByTagName(tag);
+        while (elements.length > 0) {
+            elements[0].parentNode.removeChild(elements[0]);
+        }
+    });
+    
+    // Get text content and clean it up
+    let content = bodyClone.textContent || '';
+    content = content
+        .replace(/\s+/g, ' ')  // Replace multiple spaces with single space
+        .trim();
+    
+    // Count words
+    const wordCount = content.split(/\s+/).length;
+    
+    // Only return content if it's longer than 50 words
+    if (wordCount > 50) {
+        return content;
+    }
+    return null;
+}
+
+async function summarizeContent() {
+    const content = getMainContent();
+    
+    // If content is null or too short, don't proceed with summarization
+    if (!content) {
+        console.log('Content is too short or empty - skipping summarization');
+        return;
+    }
+    
+    // Proceed with existing summarization logic
+    try {
+        // ... rest of your summarization code ...
+    } catch (error) {
+        console.error('Error during summarization:', error);
+    }
+} 
