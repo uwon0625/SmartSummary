@@ -5,7 +5,8 @@
   "description": "Summarizes content on hover using Groq AI",
   "permissions": [
     "activeTab",
-    "storage"
+    "storage",
+    "alarms"
   ],
   "host_permissions": [
     "https://generativelanguage.googleapis.com/*"
@@ -32,5 +33,15 @@
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  }
+  },
+  "web_accessible_resources": [{
+    "resources": [
+      "icons/icon16.png",
+      "icons/icon16-disabled.png",
+      "icons/icon32.png",
+      "icons/icon48.png",
+      "icons/icon128.png"
+    ],
+    "matches": ["<all_urls>"]
+  }]
 } 

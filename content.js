@@ -1,11 +1,30 @@
 // Constants
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
-let GEMINI_API_KEY = '';
+let GEMINI_API_KEY = null;
 
-// Wait for config to be loaded
-window.addEventListener('load', () => {
-    GEMINI_API_KEY = window.CONFIG?.GEMINI_API_KEY;
-});
+// Function to get API key
+async function getApiKey() {
+    if (GEMINI_API_KEY) return GEMINI_API_KEY;
+    
+    try {
+        // Try to get from window.CONFIG first
+        if (window.CONFIG?.GEMINI_API_KEY) {
+            GEMINI_API_KEY = window.CONFIG.GEMINI_API_KEY;
+            return GEMINI_API_KEY;
+        }
+        
+        // If not found, try to get from storage
+        return new Promise((resolve) => {
+            chrome.storage.local.get(['GEMINI_API_KEY'], function(result) {
+                GEMINI_API_KEY = result.GEMINI_API_KEY;
+                resolve(GEMINI_API_KEY);
+            });
+        });
+    } catch (error) {
+        console.error('Error getting API key:', error);
+        throw new Error('API key not available');
+    }
+}
 
 const browserAPI = window.browser || window.chrome;
 
@@ -23,15 +42,116 @@ class ContentSummarizer {
         this.speechSynthesis = window.speechSynthesis;
         this.currentUtterance = null;
         this.voices = [];
-        this.rateLimitedUntil = 0;  // Timestamp when rate limit expires
+        this.rateLimitedUntil = 0;
+        this.languageCache = new Map();
+        this.lastDetectionTime = 0;
+        this.detectionCooldown = 1000;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 3;
         this.setupListeners();
         this.loadSettings();
         this.loadVoices();
     }
 
-    getRateLimitMessage() {
-        const waitTime = Math.ceil((this.rateLimitedUntil - Date.now()) / 1000);
-        return `Gemini API rate limit reached. Please wait ${waitTime} seconds before trying again.`;
+    async reconnectExtension() {
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            console.log('Max reconnection attempts reached, reloading page...');
+            window.location.reload();
+            return false;
+        }
+
+        this.reconnectAttempts++;
+        console.log(`Attempting to reconnect (attempt ${this.reconnectAttempts})...`);
+
+        // Wait a bit before trying to reconnect
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Check if extension context is restored
+        if (chrome.runtime?.id) {
+            console.log('Extension context restored');
+            this.reconnectAttempts = 0;
+            return true;
+        }
+
+        return false;
+    }
+
+    normalizeLanguageCode(lang) {
+        if (!lang) return 'en';
+        
+        // Handle common variations
+        const langMap = {
+            // East Asian languages
+            'zh': 'zh-TW',  // Default Chinese to Traditional
+            'zh-CN': 'zh-CN',
+            'zh-TW': 'zh-TW',
+            'zh-HK': 'zh-TW',
+            'zh-MO': 'zh-TW',
+            'zh-SG': 'zh-CN',
+            'ja': 'ja-JP',
+            'ko': 'ko-KR',
+            
+            // European languages
+            'fr': 'fr-FR',  // French
+            'fr-CA': 'fr-FR',
+            'fr-BE': 'fr-FR',
+            'fr-CH': 'fr-FR',
+            'es': 'es-ES',  // Spanish
+            'es-MX': 'es-ES',
+            'es-AR': 'es-ES',
+            'es-CO': 'es-ES',
+            'pt': 'pt-PT',  // Portuguese
+            'pt-BR': 'pt-BR',
+            'de': 'de-DE',  // German
+            'de-AT': 'de-DE',
+            'de-CH': 'de-DE',
+            'it': 'it-IT',  // Italian
+            'ru': 'ru-RU',  // Russian
+            
+            // Middle Eastern languages
+            'ar': 'ar-SA',  // Arabic
+            'ar-AE': 'ar-SA',
+            'ar-BH': 'ar-SA',
+            'ar-EG': 'ar-SA',
+            'fa': 'fa-IR',  // Persian/Farsi
+            'he': 'he-IL',  // Hebrew
+            
+            // South Asian languages
+            'hi': 'hi-IN',  // Hindi
+            'bn': 'bn-IN',  // Bengali
+            'ta': 'ta-IN',  // Tamil
+            'ur': 'ur-PK',  // Urdu
+            
+            // Southeast Asian languages
+            'th': 'th-TH',  // Thai
+            'vi': 'vi-VN',  // Vietnamese
+            'id': 'id-ID',  // Indonesian
+            'ms': 'ms-MY',  // Malay
+            
+            // Nordic languages
+            'sv': 'sv-SE',  // Swedish
+            'da': 'da-DK',  // Danish
+            'no': 'nb-NO',  // Norwegian
+            'fi': 'fi-FI',  // Finnish
+            
+            // Other European languages
+            'nl': 'nl-NL',  // Dutch
+            'pl': 'pl-PL',  // Polish
+            'tr': 'tr-TR',  // Turkish
+            'el': 'el-GR',  // Greek
+            'cs': 'cs-CZ',  // Czech
+            'hu': 'hu-HU',  // Hungarian
+            'ro': 'ro-RO',  // Romanian
+            'uk': 'uk-UA'   // Ukrainian
+        };
+        
+        try {
+            const baseLang = (lang || '').split('-')[0].toLowerCase();
+            return langMap[baseLang] || langMap[lang] || 'en';  // Default to 'en' if no match
+        } catch (error) {
+            console.error('Language normalization error:', error);
+            return 'en';  // Fallback to English on error
+        }
     }
 
     createTooltip() {
@@ -51,6 +171,7 @@ class ContentSummarizer {
             font-size: 14px;
             line-height: 1.4;
         `;
+        
         const style = document.createElement('style');
         style.textContent = `
             .warning-text {
@@ -70,11 +191,9 @@ class ContentSummarizer {
 
     createOverlay() {
         const overlay = document.createElement('div');
-        overlay.className = 'ai-summary-overlay';
         overlay.style.cssText = `
-            position: fixed;
-            background: rgba(76, 175, 80, 0.1);
-            border: 2px solid #4CAF50;
+            position: absolute;
+            background: rgba(255, 255, 0, 0.1);
             pointer-events: none;
             z-index: 10000;
             display: none;
@@ -90,7 +209,6 @@ class ContentSummarizer {
             if (e.key === 'Escape') {
                 this.isEnabled = false;
                 this.hideTooltipAndOverlay();
-                this.stopSpeech();
                 chrome.runtime.sendMessage({ 
                     action: 'updateState', 
                     isEnabled: false 
@@ -103,7 +221,6 @@ class ContentSummarizer {
                 this.isEnabled = request.isEnabled;
                 if (!this.isEnabled) {
                     this.hideTooltipAndOverlay();
-                    this.stopSpeech();
                 }
             } else if (request.action === 'setLanguageLevel') {
                 this.languageLevel = request.languageLevel;
@@ -115,11 +232,6 @@ class ContentSummarizer {
                 if (this.voiceOption === 'none') {
                     this.stopSpeech();
                 }
-            } else if (request.action === 'setSiteScope') {
-                this.siteScope = request.siteScope;
-                // Enable for current site if scope is 'current' and this is the current site
-                this.isEnabled = this.siteScope === 'all' || 
-                    (this.siteScope === 'current' && request.hostname === this.hostname);
             }
         });
 
@@ -137,37 +249,13 @@ class ContentSummarizer {
                 this.hideTooltipAndOverlay();
             }
         });
-
-        window.addEventListener('blur', () => {
-            this.hideTooltipAndOverlay();
-        });
-
-        document.addEventListener('visibilitychange', () => {
-            if (document.hidden) {
-                this.hideTooltipAndOverlay();
-            }
-        });
     }
 
-    async handleMouseMove(e) {
-        const element = document.elementFromPoint(e.clientX, e.clientY);
-        if (!element) return;
-
-        const container = this.findMeaningfulContainer(element);
-        if (!container) {
-            this.hideTooltipAndOverlay();
-            return;
-        }
-
-        // If it's the same element, just update position
-        if (this.currentElement === container) {
-            this.updateTooltipPosition(e);
-            return;
-        }
-
-        // If it's a new element, hide previous and show new
-        this.currentElement = container;
-        await this.showSummaryWithOverlay(container, e);
+    hideTooltipAndOverlay() {
+        this.tooltip.style.display = 'none';
+        this.overlay.style.display = 'none';
+        this.stopSpeech();
+        this.currentElement = null;
     }
 
     updateTooltipPosition(event) {
@@ -189,10 +277,182 @@ class ContentSummarizer {
         this.tooltip.style.top = `${top}px`;
     }
 
+    async handleMouseMove(e) {
+        const element = document.elementFromPoint(e.clientX, e.clientY);
+        if (!element) return;
+
+        const container = this.findMeaningfulContainer(element);
+        if (!container) {
+            this.hideTooltipAndOverlay();
+            this.stopSpeech();
+            return;
+        }
+
+        // If it's the same element, just update position
+        if (this.currentElement === container) {
+            this.updateTooltipPosition(e);
+            return;
+        }
+
+        // Stop previous speech before showing new summary
+        this.stopSpeech();
+
+        // If it's a new element, hide previous and show new
+        this.currentElement = container;
+        await this.showSummaryWithOverlay(container, e);
+    }
+
+    findMeaningfulContainer(element) {
+        const meaningfulTags = ['p', 'article', 'section', 'div'];
+        let current = element;
+        
+        while (current && current !== document.body) {
+            if (meaningfulTags.includes(current.tagName.toLowerCase())) {
+                const text = current.textContent.trim();
+                const wordCount = text.split(/\s+/).length;
+                if (wordCount >= 100) {
+                    return current;
+                }
+            }
+            current = current.parentElement;
+        }
+        
+        return null;
+    }
+
+    async detectLanguage(text) {
+        try {
+            // Quick check for English content first
+            const hasChineseChars = /[\u4e00-\u9fff]/.test(text);
+            const hasJapaneseChars = /[\u3040-\u309f\u30a0-\u30ff]/.test(text);
+            const hasKoreanChars = /[\uac00-\ud7af]/.test(text);
+            const hasLatinChars = /[a-zA-Z]/.test(text);
+            
+            // If text is primarily English (contains Latin chars but no Asian chars)
+            if (hasLatinChars && !hasChineseChars && !hasJapaneseChars && !hasKoreanChars) {
+                console.debug('Text appears to be English based on character analysis');
+                return 'en';
+            }
+
+            // Check cache first
+            const cacheKey = text.slice(0, 100);
+            console.debug('Analyzing text:', text.slice(0, 100) + '...');
+            console.debug('Current URL:', window.location.href);
+            console.debug('Previous URL:', this._lastUrl);
+
+            if (this.languageCache.has(cacheKey)) {
+                const cachedLang = this.languageCache.get(cacheKey);
+                console.debug('Found cached language:', cachedLang);
+                return cachedLang;
+            }
+
+            // Rate limit check
+            const now = Date.now();
+            if (now - this.lastDetectionTime < this.detectionCooldown) {
+                console.debug('Rate limiting in effect, waiting...');
+                await new Promise(resolve => 
+                    setTimeout(resolve, this.detectionCooldown - (now - this.lastDetectionTime))
+                );
+            }
+            this.lastDetectionTime = now;
+
+            const sampleText = text.slice(0, 500);
+            
+            try {
+                const apiKey = await getApiKey();
+                if (!apiKey) {
+                    throw new Error('API key not available');
+                }
+
+                const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        contents: [{
+                            parts: [{
+                                text: `Language detection task. Respond with ONLY the 2-letter language code. Example: "en" for English text, "zh" for Chinese text. Analyze: "${sampleText}"`
+                            }]
+                        }],
+                        generationConfig: {
+                            temperature: 0.1,
+                            candidateCount: 1,
+                            maxOutputTokens: 1,
+                            topK: 1,
+                            topP: 1
+                        }
+                    })
+                });
+
+                const responseText = await response.text();
+                console.debug('Raw API response:', responseText);
+
+                if (!response.ok) {
+                    throw new Error(`API error (${response.status}): ${responseText}`);
+                }
+
+                const data = JSON.parse(responseText);
+                console.debug('Parsed API response:', data);
+
+                const detectedLang = data.candidates[0].content.parts[0].text.trim().toLowerCase();
+                console.debug('Raw detected language:', detectedLang);
+
+                const cleanLang = detectedLang.replace(/[^a-z-]/gi, '').slice(0, 2);
+                console.debug('Cleaned language code:', cleanLang);
+
+                const normalizedLang = this.normalizeLanguageCode(cleanLang);
+                console.debug('Final normalized language:', normalizedLang);
+
+                this.languageCache.set(cacheKey, normalizedLang);
+                return normalizedLang;
+
+            } catch (apiError) {
+                console.error('API call failed:', apiError);
+                // If API fails, use character analysis
+                if (hasLatinChars && !hasChineseChars && !hasJapaneseChars && !hasKoreanChars) {
+                    console.debug('Falling back to English based on character analysis');
+                    return 'en';
+                }
+                throw apiError;
+            }
+
+        } catch (error) {
+            console.error('Language detection error:', {
+                error: error.message,
+                stack: error.stack,
+                text: text.slice(0, 100) + '...'
+            });
+
+            // Check text characteristics
+            const textAnalysis = {
+                hasChineseChars,
+                hasJapaneseChars,
+                hasKoreanChars,
+                hasLatinChars,
+                pageLang: document.documentElement.lang || 
+                    document.querySelector('html').getAttribute('lang')
+            };
+            console.debug('Fallback analysis:', textAnalysis);
+
+            // Use character analysis for fallback
+            if (hasChineseChars) return 'zh-TW';
+            if (hasJapaneseChars) return 'ja-JP';
+            if (hasKoreanChars) return 'ko-KR';
+            if (hasLatinChars) return 'en';
+            
+            return 'en';  // Default to English if nothing else matches
+        }
+    }
+
     async showSummaryWithOverlay(element, event) {
         const text = element.textContent.trim();
         const wordCount = text ? text.split(/\s+/).length : 0;
         if (!text || wordCount < 100 || !this.canSummarize()) return;
+
+        // Detect language of the current text block
+        const contentLanguage = await this.detectLanguage(text);
+        console.debug('Detected language:', contentLanguage, 'for text:', text.slice(0, 50) + '...');
 
         // Update overlay
         const rect = element.getBoundingClientRect();
@@ -207,7 +467,7 @@ class ContentSummarizer {
         if (this.summaryCache.has(text)) {
             summary = this.summaryCache.get(text);
         } else {
-            summary = await this.summarizeText(text);
+            summary = await this.summarizeText(text, contentLanguage);
             this.summaryCache.set(text, summary);
         }
 
@@ -216,137 +476,147 @@ class ContentSummarizer {
         this.tooltip.style.display = 'block';
         this.updateTooltipPosition(event);
         if (!summary.includes('Error') && !summary.includes('Please set your Groq API key')) {
-            this.speakSummary(summary);
+            this.speakSummary(summary, contentLanguage);
         }
     }
 
-    hideTooltipAndOverlay() {
-        this.tooltip.style.display = 'none';
-        this.overlay.style.display = 'none';
-        this.stopSpeech();
-        this.currentElement = null;
-    }
-
-    findMeaningfulContainer(element) {
-        // Tags that we want to exclude completely
-        const excludedTags = ['button', 'nav', 'header', 'footer', 'menu'];
-        // Tags that might contain meaningful content despite being headers
-        const headerTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'];
-        // Tags that are likely to contain meaningful content
-        const meaningfulTags = ['p', 'article', 'div', 'section', 'main'];
-        let current = element;
-
-        while (current && current !== document.body) {
-            // Skip if element is or is within excluded tags
-            if (excludedTags.includes(current.tagName.toLowerCase())) {
-                return null;
-            }
-            
-            // Skip if the element is just a link with no substantial content
-            if (current.tagName.toLowerCase() === 'a') {
-                const hasOnlyLink = Array.from(current.childNodes).every(node => 
-                    node.nodeType === Node.TEXT_NODE || 
-                    node.tagName?.toLowerCase() === 'img' ||
-                    node.tagName?.toLowerCase() === 'svg'
-                );
-                if (hasOnlyLink) {
-                    return null;
-                }
-            }
-            
-            // Check if element has enough text content
-            const text = current.textContent?.trim();
-            const wordCount = text ? text.split(/\s+/).length : 0;
-            
-            // Different word count thresholds for different types of content
-            let minWordCount = 100;  // Default minimum word count
-            
-            // Adjust threshold for headers with following content
-            if (headerTags.includes(current.tagName.toLowerCase())) {
-                const nextElement = current.nextElementSibling;
-                if (nextElement) {
-                    const combinedText = text + ' ' + nextElement.textContent.trim();
-                    const combinedWordCount = combinedText.split(/\s+/).length;
-                    if (combinedWordCount >= minWordCount) {
-                        return nextElement;  // Return the content following the header
-                    }
-                }
-                return null;  // Skip standalone headers
-            }
-            
-            if (text && text.length > 50 && wordCount >= minWordCount &&
-                (meaningfulTags.includes(current.tagName.toLowerCase()) ||
-                 current.className.includes('text') ||
-                 current.className.includes('content') ||
-                 // Additional checks for content containers
-                 current.className.includes('paragraph') ||
-                 current.className.includes('body') ||
-                 current.getAttribute('role') === 'article' ||
-                 current.getAttribute('role') === 'main')) {
-               
-                // If this is a large container, try to find a more specific content block
-                if (wordCount > 500) {
-                    const betterContainer = Array.from(current.children)
-                        .find(child => {
-                            const childText = child.textContent.trim();
-                            const childWordCount = childText.split(/\s+/).length;
-                            return childWordCount >= minWordCount && 
-                                   meaningfulTags.includes(child.tagName.toLowerCase());
-                        });
-                    if (betterContainer) {
-                        return betterContainer;
-                    }
-                }
-                return current;
-            }
-            current = current.parentElement;
-        }
-        return null;
-    }
-
-    async summarizeText(text) {
+    async summarizeText(text, contentLanguage) {
         try {
-            // Wait for API key to be loaded if necessary
-            if (!GEMINI_API_KEY) {
-                GEMINI_API_KEY = window.CONFIG?.GEMINI_API_KEY;
-                if (!GEMINI_API_KEY) {
-                    throw new Error('API key not loaded');
+            try {
+                const apiKey = await getApiKey();
+                if (!apiKey) {
+                    throw new Error('API key not available');
                 }
-            }
-            if (Date.now() < this.rateLimitedUntil) {
-                return this.getRateLimitMessage();
-            }
 
-            const response = await new Promise((resolve) => {
-                chrome.storage.local.get(['languageLevel'], resolve);
-            });
+                if (Date.now() < this.rateLimitedUntil) {
+                    return this.getRateLimitMessage();
+                }
 
-            return await this.summarizeChunk(text, GEMINI_API_KEY);
+                // Check if extension context is still valid
+                if (!chrome.runtime?.id) {
+                    console.log('Extension context lost, attempting to reconnect...');
+                    const reconnected = await this.reconnectExtension();
+                    if (!reconnected) {
+                        throw new Error('Extension context invalidated');
+                    }
+                }
+
+                // Get language level from memory first
+                let level = this.languageLevel;
+
+                // If not in memory, try to get from storage
+                if (!level) {
+                    try {
+                        const response = await chrome.storage.local.get(['languageLevel']);
+                        level = response.languageLevel || 'intermediate';
+                        this.languageLevel = level;
+                    } catch (storageError) {
+                        console.warn('Failed to get language level from storage:', storageError);
+                        level = 'intermediate';  // Fallback
+                    }
+                }
+
+                return await this.summarizeChunk(text, apiKey, contentLanguage);
+            } catch (innerError) {
+                if (innerError.message === 'Extension context invalidated') {
+                    return 'Extension reconnecting... Please try again in a moment.';
+                }
+                throw innerError;
+            }
         } catch (error) {
             console.error('Error summarizing:', error);
-            return 'Error generating summary';
+            switch (error.message) {
+                case 'API key not available':
+                    return 'Please set your Gemini API key in the extension options';
+                case 'Extension context invalidated':
+                    return 'Extension disconnected. Please refresh the page.';
+                default:
+                    return 'Error generating summary. Please try reloading the page.';
+            }
         }
     }
 
-    async summarizeChunk(text, apiKey) {
+    getRateLimitMessage() {
+        const waitSeconds = Math.ceil((this.rateLimitedUntil - Date.now()) / 1000);
+        return `Rate limit exceeded. Please wait ${waitSeconds} seconds.`;
+    }
+
+    async summarizeChunk(text, apiKey, contentLanguage) {
         const languageLevelPrompts = {
-            beginner: "You are a helpful assistant that explains text in very simple terms, avoiding complex vocabulary and using basic sentence structures. Always start your summary with 'It'.",
-            intermediate: "You are a helpful assistant that summarizes text concisely with moderate vocabulary. Always start your summary with 'It'.",
-            advanced: "You are a helpful assistant that provides sophisticated summaries using advanced vocabulary and complex concepts. Always start your summary with 'It'."
+            beginner: {
+                'en': "You are a helpful assistant that explains text in very simple terms. Use basic vocabulary and simple sentences. Always start with 'This'.",
+                'zh-TW': "你是一個用簡單的方式解釋文字的助手。請用基礎的詞彙和簡單的句子結構。總是以「這」開始。",
+                'zh-CN': "你是一个用简单的方式解释文字的助手。请用基础的词汇和简单的句子结构。总是以「这」开始。",
+                'ja-JP': "あなたは簡単な用語で説明するアシスタントです。基本的な語彙と簡単な文構造を使用してください。必ず「これは」で始めてください。",
+                'fr-FR': "Tu es un assistant qui explique le texte de manière très simple. Utilise un vocabulaire basique et des phrases courtes. Commence toujours par 'C'est'.",
+                'es-ES': "Eres un asistente que explica el texto de forma muy simple. Usa vocabulario básico y frases cortas. Empieza siempre con 'Esto'.",
+                'pt-PT': "És um assistente que explica o texto de forma muito simples. Usa vocabulário básico e frases curtas. Começa sempre com 'Isto'.",
+                'de-DE': "Du bist ein Assistent, der Text sehr einfach erklärt. Verwende grundlegendes Vokabular und kurze Sätze. Beginne immer mit 'Das'.",
+                'ar-SA': "أنت مساعد يشرح النص بطريقة بسيطة جداً. استخدم مفردات أساسية وجمل قصيرة. ابدأ دائماً بـ 'هذا'.",
+                // Add more languages as needed
+            },
+            intermediate: {
+                'en': "You are a helpful assistant that summarizes text concisely. Use intermediate-level vocabulary. Always start with 'This'.",
+                'zh-TW': "你是一個簡潔總結文字的助手。請用中等程度的詞彙。總是以「這」開始。",
+                'zh-CN': "你是一个简洁总结文字的助手。请用中等程度的词汇。总是以「这」开始。",
+                'ja-JP': "あなたは文章を簡潔に要約するアシスタントです。中級レベルの語彙を使用してください。必ず「これは」で始めてください。",
+                'fr-FR': "Tu es un assistant qui résume le texte de façon concise. Utilise un vocabulaire de niveau intermédiaire. Commence toujours par 'C'est'.",
+                'es-ES': "Eres un asistente que resume el texto de manera concisa. Usa vocabulario de nivel intermedio. Empieza siempre con 'Esto'.",
+                'pt-PT': "És um assistente que resume o texto de forma concisa. Usa vocabulário de nível intermédio. Começa sempre com 'Isto'.",
+                'de-DE': "Du bist ein Assistent, der Text prägnant zusammenfasst. Verwende Vokabular mittleren Niveaus. Beginne immer mit 'Das'.",
+                'ar-SA': "أنت مساعد يلخص النص بإيجاز. استخدم مفردات متوسطة المستوى. ابدأ دائماً بـ 'هذا'.",
+            },
+            advanced: {
+                'en': "You are a helpful assistant that provides sophisticated summaries. Use advanced vocabulary and complex concepts. Always start with 'This'.",
+                'zh-TW': "你是一個提供專業摘要的助手。可以使用進階詞彙和複雜概念。總是以「這」開始。",
+                'zh-CN': "你是一个提供专业摘要的助手。可以使用进阶词汇和复杂概念。总是以「这」开始。",
+                'ja-JP': "あなたは高度な要約を提供するアシスタントです。高度な語彙と複雑な概念を使用できます。必ず「これは」で始めてください。",
+                'fr-FR': "Tu es un assistant qui fournit des résumés sophistiqués. Utilise un vocabulaire avancé et des concepts complexes. Commence toujours par 'C'est'.",
+                'es-ES': "Eres un asistente que proporciona resúmenes sofisticados. Usa vocabulario avanzado y conceptos complejos. Empieza siempre con 'Esto'.",
+                'pt-PT': "És um assistente que fornece resumos sofisticados. Usa vocabulário avançado e conceitos complexos. Começa sempre com 'Isto'.",
+                'de-DE': "Du bist ein Assistent, der anspruchsvolle Zusammenfassungen liefert. Verwende fortgeschrittenes Vokabular und komplexe Konzepte. Beginne immer mit 'Das'.",
+                'ar-SA': "أنت مساعد يقدم ملخصات متطورة. استخدم مفردات متقدمة ومفاهيم معقدة. ابدأ دائماً بـ 'هذا'.",
+            }
         };
+
+        // Get the appropriate prompt for the content language
+        const prompt = languageLevelPrompts[this.languageLevel][contentLanguage] || 
+            languageLevelPrompts[this.languageLevel]['en'];
+
+        // Create language-specific instruction
+        const instruction = contentLanguage.startsWith('zh') ? 
+            `請用1-2句話總結以下文字，使用${this.languageLevel}程度的語言，以「這」開始。` :
+            contentLanguage === 'ja-JP' ?
+            `1-2文で要約してください。${this.languageLevel}レベルの言葉を使用し、「これは」で始めてください。` :
+            `Summarize this in 1-2 sentences using ${this.languageLevel}-level language. Start with 'This'.`;
+
+        // Add warning/risk instruction based on language
+        const warningInstruction = contentLanguage.startsWith('zh') ?
+            "標記任何警告詞彙用<<WARNING>>...<</WARNING>>，危險概念用<<RISK>>...<</RISK>>" :
+            contentLanguage === 'ja-JP' ?
+            "警告すべき単語は<<WARNING>>...<</WARNING>>、危険な概念は<<RISK>>...<</RISK>>で囲んでください" :
+            "Mark any warning terms with <<WARNING>>...<</WARNING>> and risky concepts with <<RISK>>...<</RISK>>";
 
         const requestBody = {
             contents: [{
                 parts: [{
-                    text: `${languageLevelPrompts[this.languageLevel]}\n\nPlease summarize in 1-2 sentences, using ${this.languageLevel}-level language, starting with 'It'. Mark any warning or cautionary words with <<WARNING>>...<</WARNING>> and high-risk or dangerous concepts with <<RISK>>...<</RISK>>: ${text}`
+                    text: `${prompt}\n\n${instruction} ${warningInstruction}: ${text}`
                 }]
             }],
             generationConfig: {
                 temperature: 0.3,
                 candidateCount: 1,
-                stopSequences: ["\n"]  // Stop at first newline to keep response concise
+                stopSequences: ["\n"]
             }
         };
+
+        console.debug('Summarization request:', {
+            contentLanguage,
+            prompt,
+            instruction,
+            warningInstruction,
+            sampleText: text.slice(0, 100) + '...'
+        });
 
         const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
             method: 'POST',
@@ -358,6 +628,7 @@ class ContentSummarizer {
 
         if (!response.ok) {
             const errorText = await response.text();
+            console.error('Summarization API error:', errorText);
             if (errorText.includes('rate_limit_exceeded')) {
                 this.rateLimitedUntil = Date.now() + 60000;
                 return this.getRateLimitMessage();
@@ -366,6 +637,7 @@ class ContentSummarizer {
         }
 
         const data = await response.json();
+        console.debug('Summarization response:', data);
         let summary = data.candidates[0].content.parts[0].text.trim();
         summary = this.formatHighlightTags(summary);
         return summary;
@@ -415,124 +687,105 @@ class ContentSummarizer {
     }
 
     async loadSettings() {
-        const settings = await new Promise((resolve) => {
-            chrome.storage.local.get([
-                'languageLevel', 
-                'voiceOption',
-                'siteScope',
-                'enabledSites'
-            ], resolve);
-        });
-        this.languageLevel = settings.languageLevel || 'intermediate';
-        this.voiceOption = settings.voiceOption || 'none';
-        this.siteScope = settings.siteScope || 'current';
-        
-        // Check if extension should be enabled for this site
-        const enabledSites = settings.enabledSites || {};
-        this.isEnabled = enabledSites.allSites || enabledSites[this.hostname] || false;
+        try {
+            // Check if extension context is still valid
+            if (!chrome.runtime?.id) {
+                throw new Error('Extension context invalidated');
+            }
+
+            const settings = await new Promise((resolve) => {
+                chrome.storage.local.get([
+                    'languageLevel', 
+                    'voiceOption',
+                    'siteScope',
+                    'enabledSites'
+                ], resolve);
+            });
+            
+            this.languageLevel = settings.languageLevel || 'intermediate';
+            this.voiceOption = settings.voiceOption || 'none';
+            this.siteScope = settings.siteScope || 'current';
+            
+            // Check if extension should be enabled for this site
+            const enabledSites = settings.enabledSites || {};
+            this.isEnabled = enabledSites.allSites || enabledSites[this.hostname] || false;
+        } catch (error) {
+            console.error('Error loading settings:', error);
+            // Use default values if settings can't be loaded
+            this.languageLevel = 'intermediate';
+            this.voiceOption = 'none';
+            this.siteScope = 'current';
+            this.isEnabled = true;
+        }
     }
 
     stopSpeech() {
-        if (this.currentUtterance) {
+        if (this.speechSynthesis.speaking || this.speechSynthesis.pending) {
             this.speechSynthesis.cancel();
-            this.currentUtterance = null;
+            console.debug('Speech stopped');
         }
+        this.currentUtterance = null;
     }
 
-    speakSummary(text) {
+    speakSummary(text, contentLanguage) {
         if (this.voiceOption === 'none') return;
         
-        // Stop any current speech
+        // Ensure any previous speech is stopped
         this.stopSpeech();
         
-        // Remove HTML tags and any error messages
         let cleanText = text.replace(/<[^>]*>/g, '');
-        if (cleanText.includes('Error') || cleanText.includes('Please set your Groq API key')) {
-            return;
-        }
+        if (cleanText.includes('Error')) return;
         
         const utterance = new SpeechSynthesisUtterance(cleanText);
         
-        // Select voice based on preference
-        let voices = this.voices.filter(voice => voice.lang.startsWith('en'));
-        // Log all available voices with their properties
-        voices.forEach(voice => {
-            console.log('Voice details:', {
-                name: voice.name,
-                lang: voice.lang,
-                voiceURI: voice.voiceURI,
-                localService: voice.localService,
-                default: voice.default
-            });
-        });
+        // Add event handlers for speech
+        utterance.onstart = () => {
+            console.debug('Speech started:', cleanText.slice(0, 50) + '...');
+        };
         
+        utterance.onend = () => {
+            console.debug('Speech ended');
+            this.currentUtterance = null;
+        };
+        
+        utterance.onerror = (event) => {
+            console.error('Speech error:', event);
+            this.currentUtterance = null;
+        };
+
+        // Filter voices by content language
+        let voices = this.voices.filter(voice => 
+            voice.lang.toLowerCase().startsWith(contentLanguage.toLowerCase()) ||
+            voice.lang.toLowerCase().startsWith(contentLanguage.split('-')[0])
+        );
+        
+        // If no voices found for the specific language, fall back to English
+        if (voices.length === 0) {
+            console.log(`No voices found for ${contentLanguage}, falling back to English`);
+            voices = this.voices.filter(voice => voice.lang.startsWith('en'));
+        }
+
         if (voices.length > 0) {
             if (this.voiceOption === 'male') {
-                // Try to find a male voice using common male voice indicators
                 const maleVoice = voices.find(voice => 
                     voice.name.toLowerCase().includes('male') ||
-                    voice.name.toLowerCase().includes('david') ||
-                    voice.name.toLowerCase().includes('james') ||
-                    voice.name.toLowerCase().includes('john') ||
-                    voice.name.toLowerCase().includes('guy')
-                ) || voices.find(voice => !voice.name.toLowerCase().includes('female'));
-                
-                console.log('Selected male voice:', maleVoice?.name);
-                utterance.voice = maleVoice;
-                utterance.pitch = 0.9;
-                utterance.rate = 0.95;
+                    !voice.name.toLowerCase().includes('female')
+                );
+                utterance.voice = maleVoice || voices[0];
             } else if (this.voiceOption === 'female') {
-                // Try different approaches to find a female voice
-                let femaleVoice = null;
-                
-                // First try: Check for specific female voice names
-                femaleVoice = voices.find(voice => {
-                    const name = voice.name.toLowerCase();
-                    return name.includes('female') || 
-                           name.includes('samantha') || 
-                           name.includes('microsoft zira');
-                });
-                
-                // Second try: Check for Microsoft voices that are typically female
-                if (!femaleVoice) {
-                    femaleVoice = voices.find(voice => {
-                        const name = voice.name.toLowerCase();
-                        return name.includes('microsoft eva') || 
-                               name.includes('microsoft zira') ||
-                               name.includes('microsoft hazel');
-                    });
-                }
-                
-                // Third try: Check for Google female voices
-                if (!femaleVoice) {
-                    femaleVoice = voices.find(voice => {
-                        const name = voice.name.toLowerCase();
-                        return name.includes('google') && !name.includes('male');
-                    });
-                }
-                
-                // Fourth try: Use any available voice and modify pitch
-                if (!femaleVoice) {
-                    femaleVoice = voices[0]; // Use first available voice
-                }
-                
-                console.log('Selected female voice:', femaleVoice?.name);
-                utterance.voice = femaleVoice;
-                utterance.pitch = 1.5;  // Higher pitch for female voice
-                utterance.rate = 1.1;   // Slightly faster rate
+                const femaleVoice = voices.find(voice => 
+                    voice.name.toLowerCase().includes('female')
+                );
+                utterance.voice = femaleVoice || voices[0];
             }
         }
         
-        utterance.volume = 1;
-        this.currentUtterance = utterance;
-        // Log final voice selection
-        console.log('Final voice selection:', {
-            name: utterance.voice?.name || 'default',
-            pitch: utterance.pitch,
-            rate: utterance.rate,
-            gender: this.voiceOption
-        });
+        // Set the language for the utterance
+        utterance.lang = contentLanguage;
+        utterance.pitch = 0.9;
+        utterance.rate = 0.95;
         
+        this.currentUtterance = utterance;
         this.speechSynthesis.speak(utterance);
     }
 
