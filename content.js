@@ -322,14 +322,24 @@ class ContentSummarizer {
 
     async detectLanguage(text) {
         try {
-            // Quick check for English content first
+            // Quick check for content language
             const hasChineseChars = /[\u4e00-\u9fff]/.test(text);
             const hasJapaneseChars = /[\u3040-\u309f\u30a0-\u30ff]/.test(text);
             const hasKoreanChars = /[\uac00-\ud7af]/.test(text);
             const hasLatinChars = /[a-zA-Z]/.test(text);
+            const hasSpanishChars = /[áéíóúñ¿¡]/i.test(text);
             
-            // If text is primarily English (contains Latin chars but no Asian chars)
-            if (hasLatinChars && !hasChineseChars && !hasJapaneseChars && !hasKoreanChars) {
+            // Quick language detection based on characters
+            if (hasSpanishChars) {
+                console.debug('Text appears to be Spanish based on character analysis');
+                return 'es-ES';
+            } else if (hasChineseChars) {
+                return 'zh-TW';
+            } else if (hasJapaneseChars) {
+                return 'ja-JP';
+            } else if (hasKoreanChars) {
+                return 'ko-KR';
+            } else if (hasLatinChars && !hasChineseChars && !hasJapaneseChars && !hasKoreanChars) {
                 console.debug('Text appears to be English based on character analysis');
                 return 'en';
             }
@@ -738,6 +748,8 @@ class ContentSummarizer {
         
         const utterance = new SpeechSynthesisUtterance(cleanText);
         
+        console.debug('Speaking in language:', contentLanguage);
+        
         // Add event handlers for speech
         utterance.onstart = () => {
             console.debug('Speech started:', cleanText.slice(0, 50) + '...');
@@ -749,15 +761,42 @@ class ContentSummarizer {
         };
         
         utterance.onerror = (event) => {
-            console.error('Speech error:', event);
+            console.error('Speech error:', {
+                error: event.error,
+                message: event.message,
+                elapsedTime: event.elapsedTime,
+                language: contentLanguage,
+                text: cleanText.slice(0, 100) + '...'
+            });
+            
+            // Try fallback to a different voice if available
+            if (event.error === 'language-unavailable') {
+                console.debug('Attempting fallback voice...');
+                const fallbackVoice = this.voices.find(v => 
+                    v.lang.startsWith(contentLanguage.split('-')[0]) ||
+                    v.lang.startsWith('en')
+                );
+                if (fallbackVoice) {
+                    utterance.voice = fallbackVoice;
+                    this.speechSynthesis.speak(utterance);
+                    return;
+                }
+            }
             this.currentUtterance = null;
         };
 
         // Filter voices by content language
-        let voices = this.voices.filter(voice => 
-            voice.lang.toLowerCase().startsWith(contentLanguage.toLowerCase()) ||
-            voice.lang.toLowerCase().startsWith(contentLanguage.split('-')[0])
-        );
+        let voices = this.voices.filter(voice => {
+            const voiceLang = voice.lang.toLowerCase();
+            const contentLang = contentLanguage.toLowerCase();
+            const baseContentLang = contentLanguage.split('-')[0].toLowerCase();
+            
+            return voiceLang === contentLang || 
+                voiceLang.startsWith(baseContentLang) ||
+                (baseContentLang === 'es' && voiceLang.startsWith('es'));
+        });
+        
+        console.debug('Available voices for language:', contentLanguage, voices.map(v => v.name));
         
         // If no voices found for the specific language, fall back to English
         if (voices.length === 0) {
@@ -766,6 +805,15 @@ class ContentSummarizer {
         }
 
         if (voices.length > 0) {
+            // Sort voices by quality (prefer native over fallback)
+            voices.sort((a, b) => {
+                const aScore = a.lang.toLowerCase().startsWith(contentLanguage.toLowerCase()) ? 2 :
+                    a.lang.toLowerCase().startsWith(contentLanguage.split('-')[0]) ? 1 : 0;
+                const bScore = b.lang.toLowerCase().startsWith(contentLanguage.toLowerCase()) ? 2 :
+                    b.lang.toLowerCase().startsWith(contentLanguage.split('-')[0]) ? 1 : 0;
+                return bScore - aScore;
+            });
+
             if (this.voiceOption === 'male') {
                 const maleVoice = voices.find(voice => 
                     voice.name.toLowerCase().includes('male') ||
@@ -782,10 +830,11 @@ class ContentSummarizer {
         
         // Set the language for the utterance
         utterance.lang = contentLanguage;
-        utterance.pitch = 0.9;
-        utterance.rate = 0.95;
+        utterance.pitch = 1.0;
+        utterance.rate = 1.0;
         
         this.currentUtterance = utterance;
+        console.debug('Using voice:', utterance.voice?.name, 'for language:', contentLanguage);
         this.speechSynthesis.speak(utterance);
     }
 
