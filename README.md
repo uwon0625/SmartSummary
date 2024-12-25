@@ -6,3 +6,24 @@ This is a browser extension that uses Gemini AI to summarize content on hover lo
 
 1. Copy `config.example.js` to `config.js`
 2. Replace `YOUR_API_KEY_HERE` in `config.js` with your actual Gemini API key
+
+# Screenshots
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="assets\images\settings.png" alt="settings"/>
+    </td>
+    <td width="50%">
+      <img src="assets\images\example-en.png" alt="example in English" />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="assets\images\example-es.png" alt="example in Spanish"/>
+    </td>
+    <td width="50%">
+      <img src="assets\images\example-tw.png" alt="example in Traditional Chinese"/>
+    </td>
+  </tr>  
+</table>
