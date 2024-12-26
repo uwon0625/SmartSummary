@@ -41,7 +41,8 @@
       "icons/icon16-disabled.png",
       "icons/icon32.png",
       "icons/icon48.png",
-      "icons/icon128.png"
+      "icons/icon128.png",
+      "privacy.html"
     ],
     "matches": ["<all_urls>"]
   }]
