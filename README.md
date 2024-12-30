@@ -2,7 +2,7 @@
 
 This is a browser extension that uses Gemini AI to summarize long content. Sometimes it's just the first part of the content(when you see "..." at the end of the content), and sometimes it's the entire content. This extension provides configuration options for preferred language level and voice. It uses Gemini AI to handle the language of the content.
 
-Published at [Chrome Web Store](https://chromewebstore.google.com/detail/smart-content-summarizer/gaenohfblkigmeohomljnblmknpaahdm)
+Published at [Chrome Web Store](https://chromewebstore.google.com/details/smart-content-summarizer/gaenohfblkigmeohomljnblmknpaahdm)
 
 ## Setup
 
